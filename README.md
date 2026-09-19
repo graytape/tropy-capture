@@ -1,5 +1,7 @@
 # Tropy Capture
 
+You can use it here: [https://graytape.github.io/tropy-capture/](https://graytape.github.io/tropy-capture/)
+
 Tropy Capture is an independent, local-first web application for archival research, designed to complement [Tropy](https://tropy.org/). It accepts pasted screenshots, individual images and PDFs, or entire folders of files; lets researchers describe materials immediately; and exports a portable package that can be imported into Tropy.
 
 ## The problem
