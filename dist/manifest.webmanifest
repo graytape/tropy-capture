@@ -1,0 +1,19 @@
+{
+  "name": "Tropy Capture",
+  "short_name": "Capture",
+  "description": "Capture archival images and metadata, then import them into Tropy together.",
+  "lang": "en",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#17191c",
+  "theme_color": "#24272b",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "tropy-capture",
+  "version": "1.3.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Local-first capture of archival images and metadata for Tropy",
+  "scripts": {
+    "check": "node --check dist/app.js && node --check dist/date.js && node --check dist/i18n.js && node --check dist/session-helpers.js && node --check dist/storage.js && node --check dist/tropy.js && node --check dist/zip.js && node --check dist/sw.js"
+  }
+}
