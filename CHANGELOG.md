@@ -1,3 +1,9 @@
+## Version 1.5.0
+
+- Drag a photo thumbnail onto another thumbnail in the same item to reorder the photos. The saved order also controls their order in the Tropy export. Use the dedicated drag handle above the large preview to move a photo onto another document in the left column.
+- In the metadata panel, use the **Field spacing** switch beside the Tropy template to choose **Comfort** or **Compact**. Compact keeps labels and inputs on the same row and tightens the spacing around collapsed fields. The choice is saved with the session.
+- Wheel zoom is active by default in the main image preview. Place the pointer over the area to inspect and scroll to enlarge or shrink it, with a smooth transition. The neighboring expand button still opens the full image viewer.
+
 ## Version 1.4.0
 
 - Expand button on a photo to open a large preview. Zoom controls enlarge it, and scrollbars let you inspect the entire image.

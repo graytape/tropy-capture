@@ -87,6 +87,20 @@ export function moveCapturePage(session, pageId, targetId) {
   return { target, pageId };
 }
 
+/** Reorder photos within one item without changing their IDs or image assets. */
+export function reorderCapturePage(item, pageId, targetPageId, after = false) {
+  if (!item?.pages || pageId === targetPageId) return false;
+  const sourceIndex = item.pages.findIndex((page) => page.id === pageId);
+  const targetIndex = item.pages.findIndex((page) => page.id === targetPageId);
+  if (sourceIndex < 0 || targetIndex < 0) return false;
+  const insertionIndex = targetIndex + Number(after) - Number(sourceIndex < targetIndex);
+  if (insertionIndex === sourceIndex) return false;
+
+  const [page] = item.pages.splice(sourceIndex, 1);
+  item.pages.splice(insertionIndex, 0, page);
+  return true;
+}
+
 function normalizePath(value) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
 }

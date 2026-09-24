@@ -1,4 +1,4 @@
-const CACHE_NAME = "tropy-capture-v6";
+const CACHE_NAME = "tropy-capture-v7";
 const APP_SHELL = [
   "./",
   "./index.html",

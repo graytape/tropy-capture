@@ -16,7 +16,8 @@ import {
   collectMetadataSuggestions,
   findRestoredAsset,
   mergeCaptureItems,
-  moveCapturePage
+  moveCapturePage,
+  reorderCapturePage
 } from "./session-helpers.js";
 import {
   DEFAULT_LOCALE,
@@ -74,8 +75,11 @@ const ui = {
   dragging: false,
   draggedItemId: null,
   draggedPageId: null,
+  draggedPagePurpose: null,
   draggedPathIndex: null,
   imageZoom: 1,
+  stageZoomEnabled: true,
+  stageZoom: { pageId: null, scale: 1, x: 0, y: 0 },
   mobilePane: "viewer",
   theme: localStorage.getItem(THEME_KEY) || "system",
   locale: SUPPORTED_LOCALES.some(({ code }) => code === localStorage.getItem(LANGUAGE_KEY))
@@ -191,6 +195,7 @@ function createDefaultSession(name = t("Archive session · {date}", { date: toda
     formatDatesOnBlur: true,
     imagePathSegments: [],
     collapsedFields: [],
+    fieldDensity: "comfort",
     items: []
   };
 }
@@ -208,6 +213,7 @@ function prepareSession(raw) {
     collapsedFields: Array.isArray(raw?.collapsedFields)
       ? raw.collapsedFields.filter((property) => typeof property === "string")
       : [],
+    fieldDensity: raw?.fieldDensity === "compact" ? "compact" : "comfort",
     items: Array.isArray(raw?.items) ? raw.items : []
   };
   const fallbackTemplate = getTemplate(prepared);
@@ -477,6 +483,7 @@ function icon(name) {
     chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg>',
     image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 2-2 5 5"/></svg>',
     expand: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"/></svg>',
+    zoom: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M10 7v6M7 10h6m2 5 5 5"/></svg>',
     minus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
     folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3z"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H6v16h12V5h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>',
@@ -674,7 +681,7 @@ function renderViewer() {
           </div>
           <span class="local-badge">${icon("lock")} ${t("Local")}</span>
         </div>
-        <div class="image-stage drop-surface ${page ? "" : "empty"}">
+        <div class="image-stage drop-surface ${page ? "" : "empty"} ${ui.stageZoomEnabled && page && PREVIEWABLE_MIMES.has(page.mime) ? "zoom-enabled" : ""}">
           ${page ? renderPagePreview(page) : `
             <button type="button" class="stage-empty" data-action="add-pages">
               ${icon("image")}
@@ -685,7 +692,8 @@ function renderViewer() {
           ${page ? `
             <div class="stage-top-actions">
               <button class="icon-button glass" type="button" data-action="open-image" title="${escapeAttr(t("Open full image"))}" aria-label="${escapeAttr(t("Open full image"))}">${icon("expand")}</button>
-              <span class="stage-drag-handle" draggable="true" data-page-drag-id="${page.id}" title="${escapeAttr(t("Drag image to an item"))}" aria-label="${escapeAttr(t("Drag image to an item"))}">${icon("grip")}</span>
+              ${PREVIEWABLE_MIMES.has(page.mime) ? `<button class="icon-button glass ${ui.stageZoomEnabled ? "active" : ""}" type="button" data-action="toggle-stage-zoom" aria-pressed="${ui.stageZoomEnabled}" title="${escapeAttr(t("Zoom with mouse wheel"))}" aria-label="${escapeAttr(t("Zoom with mouse wheel"))}">${icon("zoom")}</button>` : ""}
+              <button class="stage-drag-handle" type="button" draggable="true" data-page-drag-id="${page.id}" title="${escapeAttr(t("Drag image to an item"))}" aria-label="${escapeAttr(t("Drag image to an item"))}">${icon("grip")}</button>
             </div>
             <div class="stage-controls">
               <button class="icon-button glass" type="button" data-action="move-page-left"
@@ -707,7 +715,7 @@ function renderViewer() {
           <div class="page-strip" aria-label="${escapeAttr(t("Item pages"))}">
             ${item.pages.map((candidate, index) => `
               <button type="button" draggable="true" data-page-drag-id="${candidate.id}" class="page-tile ${candidate.id === page?.id ? "selected" : ""}"
-                data-action="select-page" data-page-id="${candidate.id}" title="${escapeAttr(t("Page {number}", { number: index + 1 }))}">
+                data-action="select-page" data-page-id="${candidate.id}" title="${escapeAttr(`${t("Page {number}", { number: index + 1 })} · ${t("Drag to reorder photos")}`)}">
                 <img data-asset-src="${candidate.id}" draggable="false" alt="">
                 <span>${index + 1}</span>
               </button>
@@ -745,7 +753,9 @@ function renderPagePreview(page) {
     return `<iframe class="main-preview pdf-preview" data-asset-src="${page.id}" title="${escapeAttr(page.originalName)}"></iframe>`;
   }
   if (PREVIEWABLE_MIMES.has(page.mime)) {
-    return `<img class="main-preview" draggable="true" data-page-drag-id="${page.id}" data-asset-src="${page.id}" alt="${escapeAttr(page.originalName)}">`;
+    const zoom = ui.stageZoom;
+    return `<img class="main-preview" draggable="false" data-asset-src="${page.id}" alt="${escapeAttr(page.originalName)}"
+      style="transform: translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})">`;
   }
   return `
     <div class="unsupported-preview">
@@ -793,6 +803,7 @@ function renderMetadataFields(template, values, scope = "item") {
       <div class="metadata-field ${collapsed ? "collapsed" : ""}">
         <button class="metadata-field-toggle" type="button" data-action="toggle-field"
           data-field-property="${escapeAttr(field.property)}" aria-expanded="${!collapsed}" aria-controls="${bodyId}"
+          title="${escapeAttr(translatedLabel)}"
           aria-label="${escapeAttr(t(collapsed ? "Expand field" : "Collapse field"))}: ${escapeAttr(translatedLabel)}">
           <span>${escapeHtml(translatedLabel)}${field.isRequired ? `<em title="${escapeAttr(t("Required field"))}">*</em>` : ""}</span>
           ${icon("chevron")}
@@ -835,6 +846,15 @@ function renderMetadataPanel(item) {
           <span>${t("Tropy template")}</span>
           <select data-item-template>${renderTemplateOptions(item.templateId)}</select>
         </label>
+        <div class="field-density-row">
+          <span>${t("Field spacing")}</span>
+          <button type="button" class="field-density-switch" role="switch" data-action="toggle-density"
+            aria-checked="${session.fieldDensity === "compact"}" aria-label="${escapeAttr(t("Compact fields"))}">
+            <span class="density-comfort">${t("Comfort")}</span>
+            <span class="density-track" aria-hidden="true"><span></span></span>
+            <span class="density-compact">${t("Compact")}</span>
+          </button>
+        </div>
       </div>
       <div class="inspector-section metadata-fields">
         <div class="section-heading">
@@ -931,7 +951,7 @@ function renderSessionPanel() {
 function renderInspector() {
   const metadataActive = ui.inspectorTab === "metadata";
   return `
-    <aside class="inspector-panel app-pane ${ui.mobilePane === "inspector" ? "mobile-active" : ""}" aria-label="${escapeAttr(t("Data panel"))}">
+    <aside class="inspector-panel app-pane ${session.fieldDensity === "compact" ? "density-compact" : ""} ${ui.mobilePane === "inspector" ? "mobile-active" : ""}" aria-label="${escapeAttr(t("Data panel"))}">
       <div class="tab-bar" role="tablist">
         <button type="button" role="tab" data-action="inspector-tab" data-tab="metadata"
           class="${metadataActive ? "active" : ""}" aria-selected="${metadataActive}">${t("Metadata")}</button>
@@ -1214,6 +1234,9 @@ function revealInScroller(scroller, selector, axis) {
 }
 
 function render() {
+  if (ui.stageZoom.pageId !== ui.selectedPageId) {
+    ui.stageZoom = { pageId: ui.selectedPageId, scale: 1, x: 0, y: 0 };
+  }
   const scrollSelectors = [".item-list", ".collapsed-item-list", ".page-strip", ".inspector-scroll", ".viewer-content"];
   const scrollPositions = scrollSelectors.map((selector) => {
     const element = root.querySelector(selector);
@@ -1731,6 +1754,19 @@ async function handleAction(action, element) {
     case "new-item": createBlankItem(); break;
     case "select-item": selectItem(element.dataset.itemId); break;
     case "select-page": ui.selectedPageId = element.dataset.pageId; render(); break;
+    case "toggle-stage-zoom": {
+      ui.stageZoomEnabled = !ui.stageZoomEnabled;
+      if (!ui.stageZoomEnabled) ui.stageZoom = { pageId: ui.selectedPageId, scale: 1, x: 0, y: 0 };
+      render();
+      break;
+    }
+    case "toggle-density": {
+      session.fieldDensity = session.fieldDensity === "compact" ? "comfort" : "compact";
+      scheduleSave();
+      render();
+      root.querySelector('[data-action="toggle-density"]')?.focus();
+      break;
+    }
     case "open-image": {
       if (!selectedPage()) break;
       ui.imageZoom = 1;
@@ -1963,6 +1999,27 @@ root.addEventListener("focusout", (event) => {
   legend.classList.toggle("hidden", !presented.parts.length);
 });
 
+root.addEventListener("wheel", (event) => {
+  const stage = event.target.closest?.(".image-stage.zoom-enabled");
+  if (!ui.stageZoomEnabled || ui.modal || !stage || event.target.closest(".stage-top-actions, .stage-controls")) return;
+  const image = stage.querySelector(".main-preview[draggable='false']");
+  if (!image) return;
+  event.preventDefault();
+  const previous = ui.stageZoom.scale;
+  const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? image.clientHeight : 1);
+  const next = Math.max(1, Math.min(12, previous * Math.exp(-delta * 0.0018)));
+  if (Math.abs(next - previous) < 0.0001) return;
+  const stageBox = stage.getBoundingClientRect();
+  const centerX = stageBox.left + image.offsetLeft + image.offsetWidth / 2 + ui.stageZoom.x;
+  const centerY = stageBox.top + image.offsetTop + image.offsetHeight / 2 + ui.stageZoom.y;
+  const ratio = next / previous;
+  ui.stageZoom.x += (1 - ratio) * (event.clientX - centerX);
+  ui.stageZoom.y += (1 - ratio) * (event.clientY - centerY);
+  ui.stageZoom.scale = next;
+  if (next === 1) { ui.stageZoom.x = 0; ui.stageZoom.y = 0; }
+  image.style.transform = `translate(${ui.stageZoom.x}px, ${ui.stageZoom.y}px) scale(${next})`;
+}, { passive: false });
+
 root.addEventListener("dragstart", (event) => {
   const pathSegment = event.target.closest("[data-path-segment-index]");
   if (pathSegment && !ui.busy) {
@@ -1976,6 +2033,7 @@ root.addEventListener("dragstart", (event) => {
   const pageElement = event.target.closest("[data-page-drag-id]");
   if (pageElement && !ui.busy) {
     ui.draggedPageId = pageElement.dataset.pageDragId;
+    ui.draggedPagePurpose = pageElement.classList.contains("page-tile") ? "reorder" : "move";
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("application/x-tropy-capture-page", ui.draggedPageId);
     pageElement.classList.add("dragging");
@@ -2002,7 +2060,26 @@ root.addEventListener("dragover", (event) => {
     return;
   }
 
-  if (ui.draggedItemId || ui.draggedPageId) {
+  if (ui.draggedPagePurpose === "reorder") {
+    const target = event.target.closest(".page-strip .page-tile[data-page-id]");
+    const item = selectedItem();
+    if (!target || !item?.pages.some((page) => page.id === ui.draggedPageId)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    document.querySelectorAll(".page-tile.drop-before, .page-tile.drop-after").forEach((entry) => entry.classList.remove("drop-before", "drop-after"));
+    if (target.dataset.pageId !== ui.draggedPageId) {
+      const bounds = target.getBoundingClientRect();
+      target.classList.add(event.clientX < bounds.left + bounds.width / 2 ? "drop-before" : "drop-after");
+    }
+    const strip = target.closest(".page-strip");
+    const edge = strip.getBoundingClientRect();
+    if (event.clientX < edge.left + 28) strip.scrollLeft -= 12;
+    else if (event.clientX > edge.right - 28) strip.scrollLeft += 12;
+    return;
+  }
+
+  if (ui.draggedItemId || ui.draggedPagePurpose === "move") {
     const target = event.target.closest(".item-row, .collapsed-item-row");
     const pageSource = session.items.find((item) => item.pages.some((page) => page.id === ui.draggedPageId));
     const sourceId = ui.draggedItemId || pageSource?.id;
@@ -2016,8 +2093,8 @@ root.addEventListener("dragover", (event) => {
 });
 
 root.addEventListener("dragleave", (event) => {
-  const target = event.target.closest(".item-row.merge-target, .collapsed-item-row.merge-target, .path-segment.drop-target");
-  if (target && !target.contains(event.relatedTarget)) target.classList.remove("merge-target", "drop-target");
+  const target = event.target.closest(".item-row.merge-target, .collapsed-item-row.merge-target, .path-segment.drop-target, .page-tile.drop-before, .page-tile.drop-after");
+  if (target && !target.contains(event.relatedTarget)) target.classList.remove("merge-target", "drop-target", "drop-before", "drop-after");
 });
 
 root.addEventListener("drop", (event) => {
@@ -2033,7 +2110,25 @@ root.addEventListener("drop", (event) => {
     return;
   }
 
-  if (ui.draggedPageId || ui.draggedItemId) {
+  if (ui.draggedPagePurpose === "reorder") {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.target.closest(".page-strip .page-tile[data-page-id]");
+    const pageId = ui.draggedPageId;
+    ui.draggedPageId = null;
+    ui.draggedPagePurpose = null;
+    const item = selectedItem();
+    if (!target || !item?.pages.some((page) => page.id === pageId)) return;
+    const bounds = target.getBoundingClientRect();
+    const after = event.clientX >= bounds.left + bounds.width / 2;
+    if (reorderCapturePage(item, pageId, target.dataset.pageId, after)) {
+      scheduleSave();
+      render();
+    }
+    return;
+  }
+
+  if (ui.draggedPagePurpose === "move" || ui.draggedItemId) {
     event.preventDefault();
     event.stopPropagation();
     const target = event.target.closest(".item-row, .collapsed-item-row");
@@ -2042,6 +2137,7 @@ root.addEventListener("drop", (event) => {
     const sourceItem = pageId && session.items.find((item) => item.pages.some((page) => page.id === pageId));
     ui.draggedItemId = null;
     ui.draggedPageId = null;
+    ui.draggedPagePurpose = null;
     if (!target || target.dataset.itemId === (sourceId || sourceItem?.id)) return;
     if (pageId) movePageToItem(pageId, target.dataset.itemId);
     else mergeItems(sourceId, target.dataset.itemId);
@@ -2051,9 +2147,10 @@ root.addEventListener("drop", (event) => {
 root.addEventListener("dragend", () => {
   ui.draggedItemId = null;
   ui.draggedPageId = null;
+  ui.draggedPagePurpose = null;
   ui.draggedPathIndex = null;
-  document.querySelectorAll(".dragging, .merge-target, .drop-target").forEach((entry) => {
-    entry.classList.remove("dragging", "merge-target", "drop-target");
+  document.querySelectorAll(".dragging, .merge-target, .drop-target, .drop-before, .drop-after").forEach((entry) => {
+    entry.classList.remove("dragging", "merge-target", "drop-target", "drop-before", "drop-after");
   });
 });
 
