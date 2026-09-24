@@ -1,4 +1,4 @@
-const CACHE_NAME = "tropy-capture-v7";
+const CACHE_NAME = "tropy-capture-v8";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -7,6 +7,7 @@ const APP_SHELL = [
   "./date.js",
   "./i18n.js",
   "./session-helpers.js",
+  "./viewport.js",
   "./storage.js",
   "./tropy.js",
   "./zip.js",

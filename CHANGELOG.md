@@ -1,3 +1,10 @@
+
+## Version 1.6.0
+
+- Zoom the photo in the main preview with the mouse wheel, then click and drag the enlarged image to inspect areas outside the frame. The image stays within the viewing area. The separate photo viewer has been removed; PDFs still use the browser's viewer in the main panel.
+- Compact field spacing now always shows every field and its input, without collapse controls. Existing collapsed choices remain available when switching back to Comfort.
+- The spacing switch uses an icon for each layout instead of the Comfort and Compact text labels.
+
 ## Version 1.5.0
 
 - Drag a photo thumbnail onto another thumbnail in the same item to reorder the photos. The saved order also controls their order in the Tropy export. Use the dedicated drag handle above the large preview to move a photo onto another document in the left column.

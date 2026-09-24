@@ -10,6 +10,7 @@ import {
   storageEstimate
 } from "./storage.js";
 import { createZip } from "./zip.js";
+import { constrainPan } from "./viewport.js";
 import { datePresentation } from "./date.js";
 import {
   applyPreviousItemData,
@@ -62,6 +63,7 @@ const naturalFileOrder = new Intl.Collator(undefined, { numeric: true, sensitivi
 let session;
 let sessionIndex = [];
 let saveTimer;
+let stagePan = null;
 
 const ui = {
   selectedItemId: null,
@@ -77,7 +79,6 @@ const ui = {
   draggedPageId: null,
   draggedPagePurpose: null,
   draggedPathIndex: null,
-  imageZoom: 1,
   stageZoomEnabled: true,
   stageZoom: { pageId: null, scale: 1, x: 0, y: 0 },
   mobilePane: "viewer",
@@ -482,9 +483,9 @@ function icon(name) {
     search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>',
     chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg>',
     image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 2-2 5 5"/></svg>',
-    expand: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"/></svg>',
     zoom: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M10 7v6M7 10h6m2 5 5 5"/></svg>',
-    minus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
+    densityComfort: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/><path d="M7 2v2m0 2v2m0 7v2m0 2v2"/></svg>',
+    densityCompact: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d="m7 2 2 2 2-2m-4 20 2-2 2 2"/></svg>',
     folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3z"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H6v16h12V5h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>',
     export: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4"/><path d="M5 16v5h14v-5"/></svg>',
@@ -691,8 +692,7 @@ function renderViewer() {
           `}
           ${page ? `
             <div class="stage-top-actions">
-              <button class="icon-button glass" type="button" data-action="open-image" title="${escapeAttr(t("Open full image"))}" aria-label="${escapeAttr(t("Open full image"))}">${icon("expand")}</button>
-              ${PREVIEWABLE_MIMES.has(page.mime) ? `<button class="icon-button glass ${ui.stageZoomEnabled ? "active" : ""}" type="button" data-action="toggle-stage-zoom" aria-pressed="${ui.stageZoomEnabled}" title="${escapeAttr(t("Zoom with mouse wheel"))}" aria-label="${escapeAttr(t("Zoom with mouse wheel"))}">${icon("zoom")}</button>` : ""}
+              ${PREVIEWABLE_MIMES.has(page.mime) ? `<button class="icon-button glass ${ui.stageZoomEnabled ? "active" : ""}" type="button" data-action="toggle-stage-zoom" aria-pressed="${ui.stageZoomEnabled}" title="${escapeAttr(t("Wheel to zoom; drag image to pan"))}" aria-label="${escapeAttr(t("Wheel to zoom; drag image to pan"))}">${icon("zoom")}</button>` : ""}
               <button class="stage-drag-handle" type="button" draggable="true" data-page-drag-id="${page.id}" title="${escapeAttr(t("Drag image to an item"))}" aria-label="${escapeAttr(t("Drag image to an item"))}">${icon("grip")}</button>
             </div>
             <div class="stage-controls">
@@ -754,7 +754,7 @@ function renderPagePreview(page) {
   }
   if (PREVIEWABLE_MIMES.has(page.mime)) {
     const zoom = ui.stageZoom;
-    return `<img class="main-preview" draggable="false" data-asset-src="${page.id}" alt="${escapeAttr(page.originalName)}"
+    return `<img class="main-preview ${ui.stageZoomEnabled && zoom.scale > 1 ? "pannable" : ""}" draggable="false" data-asset-src="${page.id}" alt="${escapeAttr(page.originalName)}" title="${escapeAttr(t("Wheel to zoom; drag image to pan"))}"
       style="transform: translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})">`;
   }
   return `
@@ -792,8 +792,10 @@ function renderMetadataFields(template, values, scope = "item") {
     const listId = suggestionListId(field.property);
     const translatedLabel = template.builtin ? t(field.label) : field.label;
     const translatedHint = template.builtin ? t(field.hint || "—") : (field.hint || "—");
-    const collapsed = session.collapsedFields.includes(field.property);
+    const compact = session.fieldDensity === "compact";
+    const collapsed = !compact && session.collapsedFields.includes(field.property);
     const bodyId = `field-${scope}-${index}`;
+    const label = `${escapeHtml(translatedLabel)}${field.isRequired ? `<em title="${escapeAttr(t("Required field"))}">*</em>` : ""}`;
     const input = `<input type="text" ${dataAttribute}="${escapeAttr(field.property)}"
           aria-label="${escapeAttr(translatedLabel)}"
           value="${escapeAttr(presented.display)}" ${readonly} ${suggestions.length ? `list="${listId}"` : ""}
@@ -801,13 +803,13 @@ function renderMetadataFields(template, values, scope = "item") {
           placeholder="${escapeAttr(translatedHint)}" autocomplete="off">`;
     return `
       <div class="metadata-field ${collapsed ? "collapsed" : ""}">
-        <button class="metadata-field-toggle" type="button" data-action="toggle-field"
+        ${compact ? `<span class="metadata-field-label" title="${escapeAttr(translatedLabel)}"><span>${label}</span></span>` : `<button class="metadata-field-toggle" type="button" data-action="toggle-field"
           data-field-property="${escapeAttr(field.property)}" aria-expanded="${!collapsed}" aria-controls="${bodyId}"
           title="${escapeAttr(translatedLabel)}"
           aria-label="${escapeAttr(t(collapsed ? "Expand field" : "Collapse field"))}: ${escapeAttr(translatedLabel)}">
-          <span>${escapeHtml(translatedLabel)}${field.isRequired ? `<em title="${escapeAttr(t("Required field"))}">*</em>` : ""}</span>
+          <span>${label}</span>
           ${icon("chevron")}
-        </button>
+        </button>`}
         <div class="metadata-field-body" id="${bodyId}" ${collapsed ? "hidden" : ""}>
           <label class="field-row">
             <span class="sr-only">${escapeHtml(translatedLabel)}</span>
@@ -850,9 +852,9 @@ function renderMetadataPanel(item) {
           <span>${t("Field spacing")}</span>
           <button type="button" class="field-density-switch" role="switch" data-action="toggle-density"
             aria-checked="${session.fieldDensity === "compact"}" aria-label="${escapeAttr(t("Compact fields"))}">
-            <span class="density-comfort">${t("Comfort")}</span>
+            <span class="density-comfort" aria-hidden="true">${icon("densityComfort")}</span>
             <span class="density-track" aria-hidden="true"><span></span></span>
-            <span class="density-compact">${t("Compact")}</span>
+            <span class="density-compact" aria-hidden="true">${icon("densityCompact")}</span>
           </button>
         </div>
       </div>
@@ -1184,39 +1186,12 @@ function renderModal() {
   if (!ui.modal && !ui.confirm) return "";
   const content = ui.confirm
     ? renderConfirmModal()
-    : ui.modal === "image"
-      ? renderImageModal()
     : ui.modal === "help"
       ? renderHelpModal()
       : ui.modal === "export"
         ? renderExportModal()
         : renderSessionsModal();
   return `<div class="modal-backdrop" data-modal-backdrop>${content}</div>`;
-}
-
-function renderImageModal() {
-  const page = selectedPage();
-  if (!page) return "";
-  const raster = PREVIEWABLE_MIMES.has(page.mime);
-  return `
-    <div class="image-modal-card" role="dialog" aria-modal="true" aria-labelledby="image-modal-title">
-      <div class="image-modal-toolbar">
-        <h2 id="image-modal-title" title="${escapeAttr(page.originalName)}">${escapeHtml(page.originalName)}</h2>
-        ${raster ? `<div class="image-zoom-controls">
-          <button class="icon-button" type="button" data-action="zoom-out" title="${escapeAttr(t("Zoom out"))}" aria-label="${escapeAttr(t("Zoom out"))}">${icon("minus")}</button>
-          <span data-image-zoom-label>—</span>
-          <button class="icon-button" type="button" data-action="zoom-in" title="${escapeAttr(t("Zoom in"))}" aria-label="${escapeAttr(t("Zoom in"))}">${icon("plus")}</button>
-          <button class="small-button" type="button" data-action="zoom-fit">${t("Fit image")}</button>
-        </div>` : ""}
-        <button class="icon-button" type="button" data-action="close-modal" title="${escapeAttr(t("Close"))}" aria-label="${escapeAttr(t("Close"))}">${icon("close")}</button>
-      </div>
-      <div class="image-modal-viewport" data-image-viewport>
-        ${raster ? `<div class="image-modal-canvas"><img data-asset-src="${page.id}" data-image-zoom-target draggable="false" alt="${escapeAttr(page.originalName)}"></div>`
-          : page.mime === "application/pdf" ? `<iframe class="image-modal-pdf" data-asset-src="${page.id}" title="${escapeAttr(page.originalName)}"></iframe>`
-          : `<div class="unsupported-preview">${icon("image")}<strong>${escapeHtml(page.originalName)}</strong><span>${t("Preview is not available in this browser. The file will be exported unchanged.")}</span></div>`}
-      </div>
-    </div>
-  `;
 }
 
 function revealInScroller(scroller, selector, axis) {
@@ -1234,6 +1209,7 @@ function revealInScroller(scroller, selector, axis) {
 }
 
 function render() {
+  if (stagePan) stopStagePan();
   if (ui.stageZoom.pageId !== ui.selectedPageId) {
     ui.stageZoom = { pageId: ui.selectedPageId, scale: 1, x: 0, y: 0 };
   }
@@ -1279,33 +1255,33 @@ function render() {
   hydrateAssetUrls();
 }
 
-function applyImageZoom() {
-  const image = root.querySelector("[data-image-zoom-target]");
-  const viewport = root.querySelector("[data-image-viewport]");
-  if (!image?.naturalWidth || !viewport?.clientWidth || !viewport?.clientHeight) return;
-  const fit = Math.min(1, viewport.clientWidth / image.naturalWidth, viewport.clientHeight / image.naturalHeight);
-  image.style.width = `${Math.round(image.naturalWidth * fit * ui.imageZoom)}px`;
-  image.style.height = `${Math.round(image.naturalHeight * fit * ui.imageZoom)}px`;
-  const label = root.querySelector("[data-image-zoom-label]");
-  if (label) label.textContent = `${Math.round(fit * ui.imageZoom * 100)}%`;
+function syncStageZoom(image) {
+  const stage = image?.closest(".image-stage");
+  if (!stage || !image.offsetWidth || !image.offsetHeight) return;
+  const { x, y } = constrainPan(
+    ui.stageZoom.scale, image.offsetWidth, image.offsetHeight,
+    stage.clientWidth, stage.clientHeight, ui.stageZoom.x, ui.stageZoom.y
+  );
+  ui.stageZoom.x = x;
+  ui.stageZoom.y = y;
+  const hasHiddenArea = image.offsetWidth * ui.stageZoom.scale > stage.clientWidth + 1
+    || image.offsetHeight * ui.stageZoom.scale > stage.clientHeight + 1;
+  image.classList.toggle("pannable", ui.stageZoomEnabled && hasHiddenArea);
+  image.style.transform = `translate(${x}px, ${y}px) scale(${ui.stageZoom.scale})`;
 }
 
-function changeImageZoom(factor) {
-  const viewport = root.querySelector("[data-image-viewport]");
-  const previous = ui.imageZoom;
-  ui.imageZoom = Math.max(1, Math.min(8, Math.round(previous * factor * 100) / 100));
-  applyImageZoom();
-  if (viewport && previous !== ui.imageZoom) {
-    const ratio = ui.imageZoom / previous;
-    viewport.scrollLeft = (viewport.scrollLeft + viewport.clientWidth / 2) * ratio - viewport.clientWidth / 2;
-    viewport.scrollTop = (viewport.scrollTop + viewport.clientHeight / 2) * ratio - viewport.clientHeight / 2;
-  }
+function stopStagePan(pointerId) {
+  if (!stagePan || (pointerId !== undefined && stagePan.pointerId !== pointerId)) return;
+  const { image, pointerId: activeId } = stagePan;
+  stagePan = null;
+  image.classList.remove("panning");
+  if (image.hasPointerCapture(activeId)) image.releasePointerCapture(activeId);
 }
 
 root.addEventListener("load", (event) => {
-  if (event.target.matches?.("[data-image-zoom-target]")) applyImageZoom();
+  if (event.target.matches?.(".image-stage .main-preview[draggable='false']")) syncStageZoom(event.target);
 }, true);
-window.addEventListener("resize", applyImageZoom);
+window.addEventListener("resize", () => syncStageZoom(root.querySelector(".image-stage .main-preview[draggable='false']")));
 
 async function hydrateAssetUrls() {
   const elements = Array.from(document.querySelectorAll("[data-asset-src]"));
@@ -1767,18 +1743,8 @@ async function handleAction(action, element) {
       root.querySelector('[data-action="toggle-density"]')?.focus();
       break;
     }
-    case "open-image": {
-      if (!selectedPage()) break;
-      ui.imageZoom = 1;
-      ui.modal = "image";
-      render();
-      root.querySelector('.image-modal-toolbar [data-action="close-modal"]')?.focus();
-      break;
-    }
-    case "zoom-in": changeImageZoom(1.5); break;
-    case "zoom-out": changeImageZoom(1 / 1.5); break;
-    case "zoom-fit": changeImageZoom(1 / ui.imageZoom); break;
     case "toggle-field": {
+      if (session.fieldDensity === "compact") break;
       const property = element.dataset.fieldProperty;
       const collapsed = new Set(session.collapsedFields);
       if (collapsed.has(property)) collapsed.delete(property);
@@ -1876,9 +1842,7 @@ async function handleAction(action, element) {
     }
     case "sessions": await refreshSessionIndex(); ui.modal = "sessions"; render(); break;
     case "close-modal": if (!ui.busy) {
-      const imageWasOpen = ui.modal === "image";
       ui.modal = null; ui.confirm = null; render();
-      if (imageWasOpen) root.querySelector('[data-action="open-image"]')?.focus();
     } break;
     case "export-zip": await exportZip(); break;
     case "export-folder": await exportFolder(); break;
@@ -2004,6 +1968,8 @@ root.addEventListener("wheel", (event) => {
   if (!ui.stageZoomEnabled || ui.modal || !stage || event.target.closest(".stage-top-actions, .stage-controls")) return;
   const image = stage.querySelector(".main-preview[draggable='false']");
   if (!image) return;
+  if (!image.offsetWidth || !image.offsetHeight) return;
+  if (stagePan) stopStagePan();
   event.preventDefault();
   const previous = ui.stageZoom.scale;
   const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? image.clientHeight : 1);
@@ -2017,8 +1983,38 @@ root.addEventListener("wheel", (event) => {
   ui.stageZoom.y += (1 - ratio) * (event.clientY - centerY);
   ui.stageZoom.scale = next;
   if (next === 1) { ui.stageZoom.x = 0; ui.stageZoom.y = 0; }
-  image.style.transform = `translate(${ui.stageZoom.x}px, ${ui.stageZoom.y}px) scale(${next})`;
+  syncStageZoom(image);
 }, { passive: false });
+
+root.addEventListener("pointerdown", (event) => {
+  if (!event.isPrimary || event.button !== 0 || ui.busy || ui.modal || !ui.stageZoomEnabled || ui.stageZoom.scale <= 1) return;
+  const image = event.target.closest?.(".image-stage.zoom-enabled .main-preview.pannable");
+  if (!image) return;
+  if (stagePan) stopStagePan();
+  stagePan = {
+    image, pointerId: event.pointerId,
+    clientX: event.clientX, clientY: event.clientY,
+    x: ui.stageZoom.x, y: ui.stageZoom.y
+  };
+  image.classList.add("panning");
+  image.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+root.addEventListener("pointermove", (event) => {
+  if (!stagePan || stagePan.pointerId !== event.pointerId) return;
+  const { image, clientX, clientY, x, y } = stagePan;
+  if (!image.isConnected) { stopStagePan(); return; }
+  ui.stageZoom.x = x + event.clientX - clientX;
+  ui.stageZoom.y = y + event.clientY - clientY;
+  syncStageZoom(image);
+  event.preventDefault();
+});
+
+root.addEventListener("pointerup", (event) => stopStagePan(event.pointerId));
+root.addEventListener("pointercancel", (event) => stopStagePan(event.pointerId));
+root.addEventListener("lostpointercapture", (event) => stopStagePan(event.pointerId));
+window.addEventListener("blur", () => stopStagePan());
 
 root.addEventListener("dragstart", (event) => {
   const pathSegment = event.target.closest("[data-path-segment-index]");
