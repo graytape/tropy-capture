@@ -69,6 +69,24 @@ export function mergeCaptureItems(session, sourceId, targetId) {
   return target;
 }
 
+/** Move one photo to another item, without creating another asset or photo record. */
+export function moveCapturePage(session, pageId, targetId) {
+  if (!session || !pageId || !targetId) return null;
+  const source = session.items.find((item) => item.pages?.some((page) => page.id === pageId));
+  const target = session.items.find((item) => item.id === targetId);
+  if (!source || !target || source.id === target.id) return null;
+
+  // A one-photo item is fully merged, including its metadata, tags and notes.
+  if (source.pages.length === 1) {
+    return mergeCaptureItems(session, source.id, target.id) ? { target, pageId } : null;
+  }
+
+  const index = source.pages.findIndex((page) => page.id === pageId);
+  const [page] = source.pages.splice(index, 1);
+  target.pages.push(page);
+  return { target, pageId };
+}
+
 function normalizePath(value) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
 }

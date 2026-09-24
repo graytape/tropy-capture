@@ -15,7 +15,8 @@ import {
   applyPreviousItemData,
   collectMetadataSuggestions,
   findRestoredAsset,
-  mergeCaptureItems
+  mergeCaptureItems,
+  moveCapturePage
 } from "./session-helpers.js";
 import {
   DEFAULT_LOCALE,
@@ -72,7 +73,9 @@ const ui = {
   progress: null,
   dragging: false,
   draggedItemId: null,
+  draggedPageId: null,
   draggedPathIndex: null,
+  imageZoom: 1,
   mobilePane: "viewer",
   theme: localStorage.getItem(THEME_KEY) || "system",
   locale: SUPPORTED_LOCALES.some(({ code }) => code === localStorage.getItem(LANGUAGE_KEY))
@@ -187,6 +190,7 @@ function createDefaultSession(name = t("Archive session · {date}", { date: toda
     captureMode: "new",
     formatDatesOnBlur: true,
     imagePathSegments: [],
+    collapsedFields: [],
     items: []
   };
 }
@@ -201,6 +205,9 @@ function prepareSession(raw) {
     customTemplates: Array.isArray(raw?.customTemplates) ? raw.customTemplates : [],
     formatDatesOnBlur: raw?.formatDatesOnBlur !== false,
     imagePathSegments: normalizeImagePathSegments(raw?.imagePathSegments),
+    collapsedFields: Array.isArray(raw?.collapsedFields)
+      ? raw.collapsedFields.filter((property) => typeof property === "string")
+      : [],
     items: Array.isArray(raw?.items) ? raw.items : []
   };
   const fallbackTemplate = getTemplate(prepared);
@@ -469,6 +476,8 @@ function icon(name) {
     search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>',
     chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg>',
     image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 2-2 5 5"/></svg>',
+    expand: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"/></svg>',
+    minus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
     folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3z"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H6v16h12V5h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>',
     export: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4"/><path d="M5 16v5h14v-5"/></svg>',
@@ -674,6 +683,10 @@ function renderViewer() {
             </button>
           `}
           ${page ? `
+            <div class="stage-top-actions">
+              <button class="icon-button glass" type="button" data-action="open-image" title="${escapeAttr(t("Open full image"))}" aria-label="${escapeAttr(t("Open full image"))}">${icon("expand")}</button>
+              <span class="stage-drag-handle" draggable="true" data-page-drag-id="${page.id}" title="${escapeAttr(t("Drag image to an item"))}" aria-label="${escapeAttr(t("Drag image to an item"))}">${icon("grip")}</span>
+            </div>
             <div class="stage-controls">
               <button class="icon-button glass" type="button" data-action="move-page-left"
                 ${selectedIndex <= 0 ? "disabled" : ""} title="${escapeAttr(t("Move page left"))}">
@@ -693,9 +706,9 @@ function renderViewer() {
         ${item.pages.length ? `
           <div class="page-strip" aria-label="${escapeAttr(t("Item pages"))}">
             ${item.pages.map((candidate, index) => `
-              <button type="button" class="page-tile ${candidate.id === page?.id ? "selected" : ""}"
+              <button type="button" draggable="true" data-page-drag-id="${candidate.id}" class="page-tile ${candidate.id === page?.id ? "selected" : ""}"
                 data-action="select-page" data-page-id="${candidate.id}" title="${escapeAttr(t("Page {number}", { number: index + 1 }))}">
-                <img data-asset-src="${candidate.id}" alt="">
+                <img data-asset-src="${candidate.id}" draggable="false" alt="">
                 <span>${index + 1}</span>
               </button>
             `).join("")}
@@ -732,7 +745,7 @@ function renderPagePreview(page) {
     return `<iframe class="main-preview pdf-preview" data-asset-src="${page.id}" title="${escapeAttr(page.originalName)}"></iframe>`;
   }
   if (PREVIEWABLE_MIMES.has(page.mime)) {
-    return `<img class="main-preview" data-asset-src="${page.id}" alt="${escapeAttr(page.originalName)}">`;
+    return `<img class="main-preview" draggable="true" data-page-drag-id="${page.id}" data-asset-src="${page.id}" alt="${escapeAttr(page.originalName)}">`;
   }
   return `
     <div class="unsupported-preview">
@@ -759,7 +772,7 @@ function suggestionListId(property) {
 }
 
 function renderMetadataFields(template, values, scope = "item") {
-  return template.fields.map((field) => {
+  return template.fields.map((field, index) => {
     const value = values?.[field.property] ?? field.value ?? "";
     const isDate = field.property === URIS.date || field.datatype === "https://tropy.org/v1/tropy#date";
     const presented = datePresentation(value, isDate && session.formatDatesOnBlur, ui.locale);
@@ -769,22 +782,35 @@ function renderMetadataFields(template, values, scope = "item") {
     const listId = suggestionListId(field.property);
     const translatedLabel = template.builtin ? t(field.label) : field.label;
     const translatedHint = template.builtin ? t(field.hint || "—") : (field.hint || "—");
+    const collapsed = session.collapsedFields.includes(field.property);
+    const bodyId = `field-${scope}-${index}`;
     const input = `<input type="text" ${dataAttribute}="${escapeAttr(field.property)}"
+          aria-label="${escapeAttr(translatedLabel)}"
           value="${escapeAttr(presented.display)}" ${readonly} ${suggestions.length ? `list="${listId}"` : ""}
           ${isDate ? `data-date-field data-date-raw="${escapeAttr(presented.raw)}"` : ""}
           placeholder="${escapeAttr(translatedHint)}" autocomplete="off">`;
     return `
-      <label class="field-row">
-        <span>${escapeHtml(translatedLabel)}${field.isRequired ? `<em title="${escapeAttr(t("Required field"))}">*</em>` : ""}</span>
-        ${isDate ? `
-          <span class="date-input-wrap">
-            ${input}
-            <small class="date-recognition ${presented.parts.length ? "" : "hidden"}"
-              aria-label="${escapeAttr(t("Recognized date parts: {parts}", { parts: presented.parts.join(", ") }))}">${escapeHtml(presented.parts.join(" · "))}</small>
-          </span>
-        ` : input}
-        ${suggestions.length ? `<datalist id="${listId}">${suggestions.map((entry) => `<option value="${escapeAttr(entry)}"></option>`).join("")}</datalist>` : ""}
-      </label>
+      <div class="metadata-field ${collapsed ? "collapsed" : ""}">
+        <button class="metadata-field-toggle" type="button" data-action="toggle-field"
+          data-field-property="${escapeAttr(field.property)}" aria-expanded="${!collapsed}" aria-controls="${bodyId}"
+          aria-label="${escapeAttr(t(collapsed ? "Expand field" : "Collapse field"))}: ${escapeAttr(translatedLabel)}">
+          <span>${escapeHtml(translatedLabel)}${field.isRequired ? `<em title="${escapeAttr(t("Required field"))}">*</em>` : ""}</span>
+          ${icon("chevron")}
+        </button>
+        <div class="metadata-field-body" id="${bodyId}" ${collapsed ? "hidden" : ""}>
+          <label class="field-row">
+            <span class="sr-only">${escapeHtml(translatedLabel)}</span>
+            ${isDate ? `
+              <span class="date-input-wrap">
+                ${input}
+                <small class="date-recognition ${presented.parts.length ? "" : "hidden"}"
+                  aria-label="${escapeAttr(t("Recognized date parts: {parts}", { parts: presented.parts.join(", ") }))}">${escapeHtml(presented.parts.join(" · "))}</small>
+              </span>
+            ` : input}
+            ${suggestions.length ? `<datalist id="${listId}">${suggestions.map((entry) => `<option value="${escapeAttr(entry)}"></option>`).join("")}</datalist>` : ""}
+          </label>
+        </div>
+      </div>
     `;
   }).join("");
 }
@@ -1138,6 +1164,8 @@ function renderModal() {
   if (!ui.modal && !ui.confirm) return "";
   const content = ui.confirm
     ? renderConfirmModal()
+    : ui.modal === "image"
+      ? renderImageModal()
     : ui.modal === "help"
       ? renderHelpModal()
       : ui.modal === "export"
@@ -1146,7 +1174,51 @@ function renderModal() {
   return `<div class="modal-backdrop" data-modal-backdrop>${content}</div>`;
 }
 
+function renderImageModal() {
+  const page = selectedPage();
+  if (!page) return "";
+  const raster = PREVIEWABLE_MIMES.has(page.mime);
+  return `
+    <div class="image-modal-card" role="dialog" aria-modal="true" aria-labelledby="image-modal-title">
+      <div class="image-modal-toolbar">
+        <h2 id="image-modal-title" title="${escapeAttr(page.originalName)}">${escapeHtml(page.originalName)}</h2>
+        ${raster ? `<div class="image-zoom-controls">
+          <button class="icon-button" type="button" data-action="zoom-out" title="${escapeAttr(t("Zoom out"))}" aria-label="${escapeAttr(t("Zoom out"))}">${icon("minus")}</button>
+          <span data-image-zoom-label>—</span>
+          <button class="icon-button" type="button" data-action="zoom-in" title="${escapeAttr(t("Zoom in"))}" aria-label="${escapeAttr(t("Zoom in"))}">${icon("plus")}</button>
+          <button class="small-button" type="button" data-action="zoom-fit">${t("Fit image")}</button>
+        </div>` : ""}
+        <button class="icon-button" type="button" data-action="close-modal" title="${escapeAttr(t("Close"))}" aria-label="${escapeAttr(t("Close"))}">${icon("close")}</button>
+      </div>
+      <div class="image-modal-viewport" data-image-viewport>
+        ${raster ? `<div class="image-modal-canvas"><img data-asset-src="${page.id}" data-image-zoom-target draggable="false" alt="${escapeAttr(page.originalName)}"></div>`
+          : page.mime === "application/pdf" ? `<iframe class="image-modal-pdf" data-asset-src="${page.id}" title="${escapeAttr(page.originalName)}"></iframe>`
+          : `<div class="unsupported-preview">${icon("image")}<strong>${escapeHtml(page.originalName)}</strong><span>${t("Preview is not available in this browser. The file will be exported unchanged.")}</span></div>`}
+      </div>
+    </div>
+  `;
+}
+
+function revealInScroller(scroller, selector, axis) {
+  const target = scroller?.querySelector(selector);
+  if (!target || !scroller.clientWidth || !scroller.clientHeight) return;
+  const box = scroller.getBoundingClientRect();
+  const selected = target.getBoundingClientRect();
+  if (axis === "x") {
+    if (selected.left < box.left) scroller.scrollLeft -= box.left - selected.left;
+    else if (selected.right > box.right) scroller.scrollLeft += selected.right - box.right;
+  } else {
+    if (selected.top < box.top) scroller.scrollTop -= box.top - selected.top;
+    else if (selected.bottom > box.bottom) scroller.scrollTop += selected.bottom - box.bottom;
+  }
+}
+
 function render() {
+  const scrollSelectors = [".item-list", ".collapsed-item-list", ".page-strip", ".inspector-scroll", ".viewer-content"];
+  const scrollPositions = scrollSelectors.map((selector) => {
+    const element = root.querySelector(selector);
+    return element ? { top: element.scrollTop, left: element.scrollLeft } : null;
+  });
   document.documentElement.lang = ui.locale;
   root.innerHTML = `
     <div class="app-shell ${ui.dragging ? "is-dragging" : ""} ${ui.libraryCollapsed ? "library-collapsed" : ""}">
@@ -1165,8 +1237,52 @@ function render() {
       ${renderModal()}
     </div>
   `;
+  scrollSelectors.forEach((selector, index) => {
+    const element = root.querySelector(selector);
+    const saved = scrollPositions[index];
+    if (element && saved) {
+      element.scrollTop = saved.top;
+      element.scrollLeft = saved.left;
+    }
+  });
+  if (ui.selectedItemId) {
+    const selector = `[data-item-id="${CSS.escape(ui.selectedItemId)}"]`;
+    revealInScroller(root.querySelector(".item-list"), selector, "y");
+    revealInScroller(root.querySelector(".collapsed-item-list"), selector, "y");
+  }
+  if (ui.selectedPageId) {
+    revealInScroller(root.querySelector(".page-strip"), `[data-page-id="${CSS.escape(ui.selectedPageId)}"]`, "x");
+  }
   hydrateAssetUrls();
 }
+
+function applyImageZoom() {
+  const image = root.querySelector("[data-image-zoom-target]");
+  const viewport = root.querySelector("[data-image-viewport]");
+  if (!image?.naturalWidth || !viewport?.clientWidth || !viewport?.clientHeight) return;
+  const fit = Math.min(1, viewport.clientWidth / image.naturalWidth, viewport.clientHeight / image.naturalHeight);
+  image.style.width = `${Math.round(image.naturalWidth * fit * ui.imageZoom)}px`;
+  image.style.height = `${Math.round(image.naturalHeight * fit * ui.imageZoom)}px`;
+  const label = root.querySelector("[data-image-zoom-label]");
+  if (label) label.textContent = `${Math.round(fit * ui.imageZoom * 100)}%`;
+}
+
+function changeImageZoom(factor) {
+  const viewport = root.querySelector("[data-image-viewport]");
+  const previous = ui.imageZoom;
+  ui.imageZoom = Math.max(1, Math.min(8, Math.round(previous * factor * 100) / 100));
+  applyImageZoom();
+  if (viewport && previous !== ui.imageZoom) {
+    const ratio = ui.imageZoom / previous;
+    viewport.scrollLeft = (viewport.scrollLeft + viewport.clientWidth / 2) * ratio - viewport.clientWidth / 2;
+    viewport.scrollTop = (viewport.scrollTop + viewport.clientHeight / 2) * ratio - viewport.clientHeight / 2;
+  }
+}
+
+root.addEventListener("load", (event) => {
+  if (event.target.matches?.("[data-image-zoom-target]")) applyImageZoom();
+}, true);
+window.addEventListener("resize", applyImageZoom);
 
 async function hydrateAssetUrls() {
   const elements = Array.from(document.querySelectorAll("[data-asset-src]"));
@@ -1236,6 +1352,17 @@ function mergeItems(sourceId, targetId) {
     source: source ? itemTitle(source) : t("Item"),
     target: target ? itemTitle(target) : t("Item")
   }), "success");
+}
+
+function movePageToItem(pageId, targetId) {
+  const moved = moveCapturePage(session, pageId, targetId);
+  if (!moved) return;
+  ui.selectedItemId = targetId;
+  ui.selectedPageId = pageId;
+  ui.mobilePane = "viewer";
+  scheduleSave();
+  render();
+  toast(t("Image moved to “{target}”.", { target: itemTitle(moved.target) }), "success");
 }
 
 function setImagePathSegments(segments) {
@@ -1604,6 +1731,33 @@ async function handleAction(action, element) {
     case "new-item": createBlankItem(); break;
     case "select-item": selectItem(element.dataset.itemId); break;
     case "select-page": ui.selectedPageId = element.dataset.pageId; render(); break;
+    case "open-image": {
+      if (!selectedPage()) break;
+      ui.imageZoom = 1;
+      ui.modal = "image";
+      render();
+      root.querySelector('.image-modal-toolbar [data-action="close-modal"]')?.focus();
+      break;
+    }
+    case "zoom-in": changeImageZoom(1.5); break;
+    case "zoom-out": changeImageZoom(1 / 1.5); break;
+    case "zoom-fit": changeImageZoom(1 / ui.imageZoom); break;
+    case "toggle-field": {
+      const property = element.dataset.fieldProperty;
+      const collapsed = new Set(session.collapsedFields);
+      if (collapsed.has(property)) collapsed.delete(property);
+      else collapsed.add(property);
+      session.collapsedFields = [...collapsed];
+      const isCollapsed = collapsed.has(property);
+      element.setAttribute("aria-expanded", String(!isCollapsed));
+      element.setAttribute("aria-label", `${t(isCollapsed ? "Expand field" : "Collapse field")}: ${element.querySelector("span")?.textContent || ""}`);
+      const field = element.closest(".metadata-field");
+      field?.classList.toggle("collapsed", isCollapsed);
+      const body = field?.querySelector(".metadata-field-body");
+      if (body) body.hidden = isCollapsed;
+      scheduleSave();
+      break;
+    }
     case "pick-files": {
       const input = document.querySelector("#file-input");
       if (input) {
@@ -1685,7 +1839,11 @@ async function handleAction(action, element) {
       break;
     }
     case "sessions": await refreshSessionIndex(); ui.modal = "sessions"; render(); break;
-    case "close-modal": if (!ui.busy) { ui.modal = null; ui.confirm = null; render(); } break;
+    case "close-modal": if (!ui.busy) {
+      const imageWasOpen = ui.modal === "image";
+      ui.modal = null; ui.confirm = null; render();
+      if (imageWasOpen) root.querySelector('[data-action="open-image"]')?.focus();
+    } break;
     case "export-zip": await exportZip(); break;
     case "export-folder": await exportFolder(); break;
     case "new-session": await newSession(); break;
@@ -1815,6 +1973,15 @@ root.addEventListener("dragstart", (event) => {
     return;
   }
 
+  const pageElement = event.target.closest("[data-page-drag-id]");
+  if (pageElement && !ui.busy) {
+    ui.draggedPageId = pageElement.dataset.pageDragId;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-tropy-capture-page", ui.draggedPageId);
+    pageElement.classList.add("dragging");
+    return;
+  }
+
   const itemRow = event.target.closest("[data-item-id]");
   if (!itemRow) return;
   ui.draggedItemId = itemRow.dataset.itemId;
@@ -1835,9 +2002,11 @@ root.addEventListener("dragover", (event) => {
     return;
   }
 
-  if (ui.draggedItemId) {
-    const target = event.target.closest("[data-item-id]");
-    if (!target || target.dataset.itemId === ui.draggedItemId) return;
+  if (ui.draggedItemId || ui.draggedPageId) {
+    const target = event.target.closest(".item-row, .collapsed-item-row");
+    const pageSource = session.items.find((item) => item.pages.some((page) => page.id === ui.draggedPageId));
+    const sourceId = ui.draggedItemId || pageSource?.id;
+    if (!target || target.dataset.itemId === sourceId) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = "move";
@@ -1864,19 +2033,24 @@ root.addEventListener("drop", (event) => {
     return;
   }
 
-  if (ui.draggedItemId) {
-    const target = event.target.closest("[data-item-id]");
-    if (!target || target.dataset.itemId === ui.draggedItemId) return;
+  if (ui.draggedPageId || ui.draggedItemId) {
     event.preventDefault();
     event.stopPropagation();
+    const target = event.target.closest(".item-row, .collapsed-item-row");
+    const pageId = ui.draggedPageId;
     const sourceId = ui.draggedItemId;
+    const sourceItem = pageId && session.items.find((item) => item.pages.some((page) => page.id === pageId));
     ui.draggedItemId = null;
-    mergeItems(sourceId, target.dataset.itemId);
+    ui.draggedPageId = null;
+    if (!target || target.dataset.itemId === (sourceId || sourceItem?.id)) return;
+    if (pageId) movePageToItem(pageId, target.dataset.itemId);
+    else mergeItems(sourceId, target.dataset.itemId);
   }
 });
 
 root.addEventListener("dragend", () => {
   ui.draggedItemId = null;
+  ui.draggedPageId = null;
   ui.draggedPathIndex = null;
   document.querySelectorAll(".dragging, .merge-target, .drop-target").forEach((entry) => {
     entry.classList.remove("dragging", "merge-target", "drop-target");
@@ -1891,13 +2065,20 @@ document.addEventListener("paste", async (event) => {
 });
 
 let dragDepth = 0;
+function isInternalDrag(event) {
+  const types = Array.from(event.dataTransfer?.types || []);
+  return Boolean(ui.draggedItemId || ui.draggedPageId || ui.draggedPathIndex !== null)
+    || types.some((type) => type.startsWith("application/x-tropy-capture-"));
+}
 document.addEventListener("dragenter", (event) => {
+  if (isInternalDrag(event)) return;
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
   dragDepth += 1;
   if (!ui.dragging) { ui.dragging = true; document.querySelector(".app-shell")?.classList.add("is-dragging"); }
 });
 document.addEventListener("dragover", (event) => {
+  if (isInternalDrag(event)) return;
   if (Array.from(event.dataTransfer?.types || []).includes("Files")) event.preventDefault();
 });
 document.addEventListener("dragleave", () => {
@@ -1905,6 +2086,7 @@ document.addEventListener("dragleave", () => {
   if (!dragDepth) { ui.dragging = false; document.querySelector(".app-shell")?.classList.remove("is-dragging"); }
 });
 document.addEventListener("drop", async (event) => {
+  if (isInternalDrag(event)) { event.preventDefault(); return; }
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
   dragDepth = 0;

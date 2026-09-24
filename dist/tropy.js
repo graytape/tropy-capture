@@ -1,6 +1,6 @@
 import { localeTag, translate } from "./i18n.js";
 
-export const APP_VERSION = "1.3.0";
+export const APP_VERSION = "1.4.0";
 
 export const URIS = {
   title: "http://purl.org/dc/elements/1.1/title",
@@ -166,7 +166,7 @@ export function safeFilename(value, fallback = "file") {
 }
 
 export function packageName(session) {
-  return safeFilename(session.name, "tropy-capture").toLowerCase();
+  return safeFilename(session.name, "tropy-capture");
 }
 
 export function safePathSegment(value, fallback = "") {
