@@ -634,6 +634,13 @@ svg {
 .inspector-empty p { max-width: 270px; margin: 7px 0 16px; }
 
 .field-row { display: grid; gap: 5px; margin-bottom: 11px; }
+.template-select-row { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 7px; align-items: end; }
+.template-select-row .field-row { min-width: 0; margin-bottom: 0; }
+.template-select-row .template-upload { width: 34px; height: 35px; }
+.export-name { margin: 12px 0; }
+.multi-preview { height: 100%; min-height: 240px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; color: var(--text-muted); }
+.multi-preview svg { width: 100px; height: 86px; fill: var(--surface-raised); stroke: var(--accent); stroke-width: 3; }
+.multi-preview strong { color: var(--text); font-size: 18px; }
 .field-row:last-child { margin-bottom: 0; }
 .metadata-field { margin-bottom: 11px; }
 .metadata-field-toggle { width: 100%; min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 7px; padding: 3px 2px; border: 0; background: transparent; color: var(--text-muted); font-size: 14px; font-weight: 600; text-align: left; }
@@ -746,6 +753,8 @@ input[readonly] { background: var(--surface-muted); color: var(--text-muted); }
 .modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .modal-header h2 { margin: 4px 0 0; font-size: 20px; line-height: 1.2; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.modal-actions button { flex-shrink: 0; }
+.modal-actions:has([data-action="merge-sessions"]) { flex-wrap: wrap; }
 .split-actions { justify-content: space-between; }
 .modal-footnote { margin: 10px 0 0; color: var(--text-muted); font-size: 12px; text-align: center; }
 

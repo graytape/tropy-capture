@@ -10,6 +10,7 @@ import {
   storageEstimate
 } from "./storage.js";
 import { createZip } from "./zip.js";
+import { readCaptureZip } from "./zip-read.js";
 import { constrainPan } from "./viewport.js";
 import { datePresentation } from "./date.js";
 import {
@@ -17,7 +18,9 @@ import {
   collectMetadataSuggestions,
   findRestoredAsset,
   mergeCaptureItems,
+  mixedValue,
   moveCapturePage,
+  prepareSessionMerge,
   reorderCapturePage
 } from "./session-helpers.js";
 import {
@@ -67,6 +70,8 @@ let stagePan = null;
 
 const ui = {
   selectedItemId: null,
+  selectedItemIds: [],
+  selectionAnchorId: null,
   selectedPageId: null,
   inspectorTab: "metadata",
   search: "",
@@ -74,6 +79,7 @@ const ui = {
   confirm: null,
   busy: false,
   progress: null,
+  exportName: null,
   dragging: false,
   draggedItemId: null,
   draggedPageId: null,
@@ -279,6 +285,11 @@ function selectedItem() {
   return session.items.find((item) => item.id === ui.selectedItemId) || null;
 }
 
+function selectedItems() {
+  const ids = new Set(ui.selectedItemIds.length ? ui.selectedItemIds : [ui.selectedItemId]);
+  return session.items.filter((item) => ids.has(item.id));
+}
+
 function selectedPage() {
   const item = selectedItem();
   return item?.pages.find((page) => page.id === ui.selectedPageId) || item?.pages[0] || null;
@@ -426,6 +437,8 @@ async function addFiles(fileList, forcedMode, options = {}) {
 
     await saveAssets(assetRecords);
     ui.selectedItemId = lastItem.id;
+    ui.selectedItemIds = [lastItem.id];
+    ui.selectionAnchorId = lastItem.id;
     ui.mobilePane = "viewer";
     if (options.focusTitleOnTab) {
       ui.focusTitleOnNextTab = true;
@@ -550,7 +563,7 @@ function renderLibrary() {
         </button>
         <div class="collapsed-item-list" role="list">
           ${items.map((item) => {
-            const selected = item.id === ui.selectedItemId;
+            const selected = ui.selectedItemIds.length ? ui.selectedItemIds.includes(item.id) : item.id === ui.selectedItemId;
             const firstPage = item.pages[0];
             return `
               <button class="collapsed-item-row ${selected ? "selected" : ""}" type="button" draggable="true"
@@ -587,7 +600,7 @@ function renderLibrary() {
         </label>
         <div class="item-list" role="list">
           ${items.length ? items.map((item) => {
-            const selected = item.id === ui.selectedItemId;
+            const selected = ui.selectedItemIds.length ? ui.selectedItemIds.includes(item.id) : item.id === ui.selectedItemId;
             const firstPage = item.pages[0];
             return `
               <button class="item-row ${selected ? "selected" : ""}" type="button" draggable="true"
@@ -658,7 +671,12 @@ function renderViewer() {
   const selectedIndex = item && page ? item.pages.findIndex((candidate) => candidate.id === page.id) : -1;
 
   let content;
-  if (!item) {
+  if (selectedItems().length > 1) {
+    content = `<div class="multi-preview" role="status">
+      <svg viewBox="0 0 120 100" aria-hidden="true"><rect x="25" y="8" width="68" height="78" rx="4"/><rect x="16" y="15" width="68" height="78" rx="4"/><path d="M31 35h38M31 46h38M31 57h27"/></svg>
+      <strong>${t("{count} items selected", { count: selectedItems().length })}</strong>
+    </div>`;
+  } else if (!item) {
     content = `
       <button type="button" class="empty-capture drop-surface" data-action="pick-files">
         <span class="capture-mark">${icon("image")}<span class="capture-plus">${icon("plus")}</span></span>
@@ -781,9 +799,10 @@ function suggestionListId(property) {
   return `suggest-${String(property).replace(/[^a-zA-Z0-9]+/g, "-")}`;
 }
 
-function renderMetadataFields(template, values, scope = "item") {
+function renderMetadataFields(template, values, scope = "item", items = []) {
   return template.fields.map((field, index) => {
-    const value = values?.[field.property] ?? field.value ?? "";
+    const aggregate = items.length > 1 ? mixedValue(items, (item) => item.metadata?.[field.property] ?? field.value ?? "") : null;
+    const value = aggregate ? aggregate.value : values?.[field.property] ?? field.value ?? "";
     const isDate = field.property === URIS.date || field.datatype === "https://tropy.org/v1/tropy#date";
     const presented = datePresentation(value, isDate && session.formatDatesOnBlur, ui.locale);
     const readonly = field.isConstant ? "readonly" : "";
@@ -798,7 +817,7 @@ function renderMetadataFields(template, values, scope = "item") {
     const label = `${escapeHtml(translatedLabel)}${field.isRequired ? `<em title="${escapeAttr(t("Required field"))}">*</em>` : ""}`;
     const input = `<input type="text" ${dataAttribute}="${escapeAttr(field.property)}"
           aria-label="${escapeAttr(translatedLabel)}"
-          value="${escapeAttr(presented.display)}" ${readonly} ${suggestions.length ? `list="${listId}"` : ""}
+          value="${escapeAttr(presented.display + (aggregate?.mixed ? "+" : ""))}" ${aggregate?.mixed ? 'data-mixed="true"' : ""} ${readonly} ${suggestions.length ? `list="${listId}"` : ""}
           ${isDate ? `data-date-field data-date-raw="${escapeAttr(presented.raw)}"` : ""}
           placeholder="${escapeAttr(translatedHint)}" autocomplete="off">`;
     return `
@@ -840,13 +859,21 @@ function renderMetadataPanel(item) {
     `;
   }
 
+  const items = selectedItems();
+  const multiple = items.length > 1;
   const template = getTemplates(session).find((candidate) => candidate.id === item.templateId) || getTemplate(session);
+  const fields = multiple ? [...new Map(items.flatMap((entry) => (getTemplates(session).find((candidate) => candidate.id === entry.templateId) || template).fields).map((field) => [field.property, field])).values()] : template.fields;
+  const visibleTemplate = { ...template, fields };
+  const binding = (key, value) => {
+    const aggregate = multiple ? mixedValue(items, (entry) => key === "tags" ? (entry.tags || []).join(", ") : entry[key]) : null;
+    return `value="${escapeAttr((aggregate ? aggregate.value : value) + (aggregate?.mixed ? "+" : ""))}" ${aggregate?.mixed ? 'data-mixed="true"' : ""}`;
+  };
   return `
     <div class="inspector-scroll">
       <div class="inspector-section compact-section">
         <label class="field-row">
           <span>${t("Tropy template")}</span>
-          <select data-item-template>${renderTemplateOptions(item.templateId)}</select>
+          <select data-item-template>${multiple && items.some((entry) => entry.templateId !== item.templateId) ? `<option value="__mixed__" selected>${t("Different templates")}</option>` : ""}${renderTemplateOptions(multiple && items.some((entry) => entry.templateId !== item.templateId) ? "__mixed__" : item.templateId)}</select>
         </label>
         <div class="field-density-row">
           <span>${t("Field spacing")}</span>
@@ -861,28 +888,28 @@ function renderMetadataPanel(item) {
       <div class="inspector-section metadata-fields">
         <div class="section-heading">
           <span class="eyebrow">${t("Description")}</span>
-          <button class="small-button" type="button" data-action="copy-previous" ${session.items.indexOf(item) < 1 ? "disabled" : ""}>
+          <button class="small-button" type="button" data-action="copy-previous" ${multiple || session.items.indexOf(item) < 1 ? "disabled" : ""}>
             ${icon("copy")} ${t("Copy previous")}
           </button>
         </div>
-        ${renderMetadataFields(template, item.metadata)}
+        ${renderMetadataFields(visibleTemplate, item.metadata, "item", items)}
       </div>
       <div class="inspector-section">
         <label class="field-row">
           <span>${t("Tags")} <small>${t("comma-separated")}</small></span>
-          <input type="text" data-item-bind="tags" value="${escapeAttr((item.tags || []).join(", "))}" placeholder="${escapeAttr(t("microfilm, needs review"))}">
+          <input type="text" data-item-bind="tags" ${binding("tags", (item.tags || []).join(", "))} placeholder="${escapeAttr(t("microfilm, needs review"))}">
         </label>
         <label class="field-row">
           <span>${t("Tropy list")} <small>${t("use / for nested lists")}</small></span>
-          <input type="text" data-item-bind="listPath" value="${escapeAttr(item.listPath || "")}" placeholder="${escapeAttr(t("Research / 2026 / Rome"))}">
+          <input type="text" data-item-bind="listPath" ${binding("listPath", item.listPath || "")} placeholder="${escapeAttr(t("Research / 2026 / Rome"))}">
         </label>
         <label class="field-row">
           <span>${t("Note")}</span>
-          <textarea data-item-bind="note" rows="5" placeholder="${escapeAttr(t("Transcription, observations, references…"))}">${escapeHtml(item.note || "")}</textarea>
+          <textarea data-item-bind="note" rows="5" ${multiple && mixedValue(items, (entry) => entry.note).mixed ? 'data-mixed="true"' : ""} placeholder="${escapeAttr(t("Transcription, observations, references…"))}">${escapeHtml(item.note || "")}${multiple && mixedValue(items, (entry) => entry.note).mixed ? "+" : ""}</textarea>
         </label>
       </div>
       <div class="inspector-danger-zone">
-        <button class="text-button danger-text" type="button" data-action="delete-item">${icon("trash")} ${t("Delete item")}</button>
+        <button class="text-button danger-text" type="button" data-action="delete-item">${icon("trash")} ${multiple ? t("Delete selected items") : t("Delete item")}</button>
       </div>
     </div>
   `;
@@ -905,15 +932,14 @@ function renderSessionPanel() {
           <span>${t("Item counter digits")}</span>
           <input type="number" min="3" max="8" data-session-bind="counterWidth" value="${Number(session.counterWidth) || 4}">
         </label>
-        <label class="field-row">
+        <div class="template-select-row"><label class="field-row">
           <span>${t("Default template")}</span>
           <select data-session-template>${renderTemplateOptions(session.templateKey)}</select>
-        </label>
+        </label><button class="icon-button template-upload" type="button" data-action="import-template" title="${escapeAttr(t("Import .ttp template"))}" aria-label="${escapeAttr(t("Import .ttp template"))}">${icon("upload")}</button></div>
         <label class="toggle-row">
           <input type="checkbox" data-session-toggle="formatDatesOnBlur" ${session.formatDatesOnBlur ? "checked" : ""}>
-          <span><strong>${t("Format recognized dates when fields are inactive")}</strong><small>${t("The stored value is shown again while editing.")}</small></span>
+          <span><strong>${t("Recognize dates")}</strong><small>${t("The stored value is shown again while editing.")}</small></span>
         </label>
-        <button class="secondary-button full-width" type="button" data-action="import-template">${icon("upload")} ${t("Import .ttp template")}</button>
       </div>
       <div class="inspector-section metadata-fields">
         <div class="section-heading stacked">
@@ -1119,6 +1145,9 @@ function renderExportModal() {
       </div>
       ${validation.errors.map((message) => `<div class="message error">${message}</div>`).join("")}
       ${validation.warnings.map((message) => `<div class="message warning">${message}</div>`).join("")}
+      <label class="field-row export-name"><span>${t("ZIP filename")}</span>
+        <input type="text" data-export-name value="${escapeAttr(ui.exportName ?? session.name)}" autocomplete="off" ${ui.busy ? "disabled" : ""}>
+      </label>
       ${renderImagePathBuilder()}
       <div class="package-tree" aria-label="${escapeAttr(t("Package contents"))}">
         <span>${icon("folder")} <strong>${escapeHtml(packageName(session))}/</strong></span>
@@ -1156,12 +1185,14 @@ function renderSessionsModal() {
               <span class="session-avatar">${icon("archive")}</span>
               <span><strong>${escapeHtml(entry.name)}</strong><small>${entry.items?.length || 0} ${t("documents")} · ${new Intl.DateTimeFormat(localeTag(ui.locale), { dateStyle: "medium", timeStyle: "short" }).format(new Date(entry.updatedAt))}</small></span>
             </button>
-            ${entry.id === session.id ? `<span class="current-label">${t("Open")}</span>` : `<button class="icon-button danger" type="button" data-action="delete-session" data-session-id="${entry.id}" title="${escapeAttr(t("Delete"))}">${icon("trash")}</button>`}
+            ${entry.id === session.id ? `<span class="current-label">${t("Open")}</span>` : `<button class="icon-button" type="button" data-action="merge-session" data-session-id="${entry.id}" title="${escapeAttr(t("Merge into current session"))}" aria-label="${escapeAttr(t("Merge into current session"))}">${icon("plus")}</button><button class="icon-button danger" type="button" data-action="delete-session" data-session-id="${entry.id}" title="${escapeAttr(t("Delete"))}">${icon("trash")}</button>`}
           </div>
         `).join("")}
       </div>
       <div class="modal-actions split-actions">
         <button class="secondary-button" type="button" data-action="restore">${icon("restore")} ${t("Restore")}</button>
+        <button class="secondary-button" type="button" data-action="merge-sessions">${icon("plus")} ${t("Merge sessions")}</button>
+        <button class="icon-button" type="button" data-action="merge-folder" title="${escapeAttr(t("Merge extracted folder"))}" aria-label="${escapeAttr(t("Merge extracted folder"))}">${icon("folder")}</button>
         <button class="primary-button" type="button" data-action="new-session">${icon("plus")} ${t("New session")}</button>
       </div>
     </div>
@@ -1233,6 +1264,8 @@ function render() {
       <input class="sr-only" id="folder-input" type="file" accept="image/*,.tif,.tiff,.heic,.jp2,.jpx,.pdf" webkitdirectory multiple>
       <input class="sr-only" id="template-input" type="file" accept=".ttp,.json,application/json">
       <input class="sr-only" id="restore-input" type="file" webkitdirectory multiple>
+      <input class="sr-only" id="merge-input" type="file" accept=".zip,application/zip">
+      <input class="sr-only" id="merge-folder-input" type="file" webkitdirectory multiple>
       ${renderModal()}
     </div>
   `;
@@ -1253,6 +1286,7 @@ function render() {
     revealInScroller(root.querySelector(".page-strip"), `[data-page-id="${CSS.escape(ui.selectedPageId)}"]`, "x");
   }
   hydrateAssetUrls();
+  if (ui.confirm) root.querySelector('[data-action="confirm-action"]')?.focus();
 }
 
 function syncStageZoom(image) {
@@ -1328,13 +1362,40 @@ function localizeError(error, fallback) {
     : t(message);
 }
 
-function selectItem(id) {
+function selectItem(id, { shiftKey = false, ctrlKey = false, metaKey = false } = {}) {
   const item = session.items.find((candidate) => candidate.id === id);
   if (!item) return;
-  ui.selectedItemId = item.id;
-  ui.selectedPageId = item.pages[0]?.id || null;
+  const visible = [...root.querySelectorAll(".item-list [data-item-id], .collapsed-item-list [data-item-id]")].map((row) => row.dataset.itemId);
+  if (shiftKey && visible.includes(ui.selectionAnchorId)) {
+    const from = visible.indexOf(ui.selectionAnchorId);
+    const to = visible.indexOf(id);
+    const range = visible.slice(Math.min(from, to), Math.max(from, to) + 1);
+    ui.selectedItemIds = ctrlKey || metaKey ? [...new Set([...ui.selectedItemIds, ...range])] : range;
+  } else if (ctrlKey || metaKey) {
+    const selection = new Set(ui.selectedItemIds.length ? ui.selectedItemIds : [ui.selectedItemId].filter(Boolean));
+    if (selection.has(id)) selection.delete(id); else selection.add(id);
+    ui.selectedItemIds = [...selection];
+    ui.selectionAnchorId = id;
+  } else {
+    ui.selectedItemIds = [id];
+    ui.selectionAnchorId = id;
+  }
+  if (!ui.selectedItemIds.length) ui.selectedItemIds = [id];
+  ui.selectedItemId = ui.selectedItemIds.includes(id) ? id : ui.selectedItemIds.at(-1);
+  ui.selectedPageId = session.items.find((entry) => entry.id === ui.selectedItemId)?.pages[0]?.id || null;
   ui.mobilePane = "viewer";
   render();
+  root.querySelector(`[data-item-id="${CSS.escape(ui.selectedItemId)}"]`)?.focus({ preventScroll: true });
+}
+
+function navigateItems(offset, event) {
+  const rows = [...root.querySelectorAll(".item-list [data-item-id], .collapsed-item-list [data-item-id]")];
+  if (!rows.length) return;
+  const index = rows.findIndex((row) => row.dataset.itemId === ui.selectedItemId);
+  const next = rows[Math.max(0, Math.min(rows.length - 1, index + offset))];
+  if (!next) return;
+  selectItem(next.dataset.itemId, event);
+  root.querySelector(`[data-item-id="${CSS.escape(next.dataset.itemId)}"]`)?.focus({ preventScroll: true });
 }
 
 function mergeItems(sourceId, targetId) {
@@ -1343,6 +1404,7 @@ function mergeItems(sourceId, targetId) {
   const merged = mergeCaptureItems(session, sourceId, targetId);
   if (!merged) return;
   ui.selectedItemId = merged.id;
+  ui.selectedItemIds = [merged.id];
   ui.selectedPageId = merged.pages[0]?.id || null;
   ui.mobilePane = "viewer";
   scheduleSave();
@@ -1357,6 +1419,7 @@ function movePageToItem(pageId, targetId) {
   const moved = moveCapturePage(session, pageId, targetId);
   if (!moved) return;
   ui.selectedItemId = targetId;
+  ui.selectedItemIds = [targetId];
   ui.selectedPageId = pageId;
   ui.mobilePane = "viewer";
   scheduleSave();
@@ -1382,6 +1445,8 @@ function createBlankItem() {
   const item = makeItem();
   session.items.push(item);
   ui.selectedItemId = item.id;
+  ui.selectedItemIds = [item.id];
+  ui.selectionAnchorId = item.id;
   ui.selectedPageId = null;
   ui.inspectorTab = "metadata";
   ui.mobilePane = "inspector";
@@ -1409,32 +1474,38 @@ function moveSelectedPage(offset) {
 }
 
 function requestDeleteItem() {
-  const item = selectedItem();
-  if (!item) return;
+  const items = selectedItems();
+  if (!items.length) return;
+  const item = items[0];
   ui.confirm = {
-    title: t("Delete this item?"),
-    message: t("“{title}” and {count} {images} will be removed from this browser.", {
+    title: items.length > 1 ? t("Delete selected items?") : t("Delete this item?"),
+    message: items.length > 1 ? t("{count} items and their images will be removed from this browser.", { count: items.length }) : t("“{title}” and {count} {images} will be removed from this browser.", {
       title: itemTitle(item),
       count: item.pages.length,
       images: t(item.pages.length === 1 ? "image" : "images")
     }),
     label: t("Delete"),
     action: async () => {
-      for (const page of item.pages) {
-        await deleteAsset(page.id);
-        const url = objectUrls.get(page.id);
-        if (url) URL.revokeObjectURL(url);
-        objectUrls.delete(page.id);
+      for (const entry of items) {
+        for (const page of entry.pages) {
+          await deleteAsset(page.id);
+          const url = objectUrls.get(page.id);
+          if (url) URL.revokeObjectURL(url);
+          objectUrls.delete(page.id);
+        }
       }
       const index = session.items.indexOf(item);
-      session.items.splice(index, 1);
+      const ids = new Set(items.map((entry) => entry.id));
+      session.items = session.items.filter((entry) => !ids.has(entry.id));
       const fallback = session.items[Math.min(index, session.items.length - 1)];
       ui.selectedItemId = fallback?.id || null;
+      ui.selectedItemIds = fallback ? [fallback.id] : [];
       ui.selectedPageId = fallback?.pages[0]?.id || null;
       await flushSave();
     }
   };
   render();
+  root.querySelector('[data-action="confirm-action"]')?.focus();
 }
 
 function requestDeletePage() {
@@ -1457,6 +1528,7 @@ function requestDeletePage() {
     }
   };
   render();
+  root.querySelector('[data-action="confirm-action"]')?.focus();
 }
 
 function copyPreviousMetadata() {
@@ -1492,9 +1564,16 @@ async function packageEntries() {
     { name: "capture-session.json", data: JSON.stringify(buildCaptureBackup(session), null, 2), type: "application/json" }
   ];
 
+  const templateNames = new Set();
   for (const template of session.customTemplates || []) {
+    const sourceName = safeFilename(template.sourceName || template.name, "template.ttp");
+    let filename = sourceName;
+    for (let number = 2; templateNames.has(filename.toLowerCase()); number++) {
+      filename = `${sourceName.replace(/\.ttp$/i, "")}-${number}.ttp`;
+    }
+    templateNames.add(filename.toLowerCase());
     entries.push({
-      name: `templates/${safeFilename(template.sourceName || template.name, "template.ttp")}`,
+      name: `templates/${filename}`,
       data: JSON.stringify(template.source || template, null, 2),
       type: "application/json"
     });
@@ -1538,7 +1617,7 @@ async function exportZip() {
       if (label) label.textContent = ui.progress.label;
       if (amount) amount.textContent = `${Math.round(value * 100)}%`;
     });
-    downloadBlob(zip, `${packageName(session)}.zip`);
+    downloadBlob(zip, `${safeFilename(String(ui.exportName || session.name).replace(/\.zip$/i, ""), packageName(session))}.zip`);
     toast(t("The ZIP package is ready. Keep it until you have imported it into Tropy."), "success", 5200);
     ui.modal = null;
   } catch (error) {
@@ -1657,6 +1736,7 @@ async function restoreFromFolder(fileList) {
     session = restored;
     localStorage.setItem(LAST_SESSION_KEY, session.id);
     ui.selectedItemId = session.items[0]?.id || null;
+    ui.selectedItemIds = ui.selectedItemId ? [ui.selectedItemId] : [];
     ui.selectedPageId = session.items[0]?.pages[0]?.id || null;
     ui.modal = null;
     await refreshSessionIndex();
@@ -1679,6 +1759,80 @@ async function refreshSessionIndex() {
   sessionIndex = await listSessions();
 }
 
+async function mergeSession(source, resolveAsset) {
+  if (ui.busy) return;
+  ui.busy = true;
+  render();
+  const original = session;
+  const records = [];
+  let committed = false;
+  try {
+    await flushSave();
+    const { merged, copies } = prepareSessionMerge(session, source, uuid);
+    for (const copy of copies) {
+      const blob = await resolveAsset(copy.originalId);
+      if (!blob) throw new Error(t("Missing image in imported session."));
+      records.push({ id: copy.id, sessionId: session.id, blob });
+    }
+    await saveAssets(records);
+    merged.updatedAt = new Date().toISOString();
+    await saveSession(merged);
+    committed = true;
+    session = merged;
+    ui.selectedItemId = merged.items[original.items.length]?.id || ui.selectedItemId;
+    ui.selectedItemIds = ui.selectedItemId ? [ui.selectedItemId] : [];
+    ui.selectedPageId = selectedItem()?.pages[0]?.id || null;
+    ui.modal = null;
+    toast(t("{count} items merged into the current session.", { count: source.items.length }), "success");
+  } catch (error) {
+    if (!committed) {
+      session = original;
+      for (const record of records) {
+        try { await deleteAsset(record.id); } catch { /* Best-effort rollback. */ }
+      }
+    }
+    console.error(error);
+    toast(localizeError(error, "Session merge failed."), "error", 6000);
+  } finally {
+    ui.busy = false;
+    if (committed) await refreshSessionIndex().catch(console.error);
+    render();
+  }
+}
+
+async function mergeLocalSession(id) {
+  const source = await getSession(id);
+  if (source && source.id !== session.id) await mergeSession(prepareSession(source), (pageId) => getAsset(pageId));
+}
+
+async function mergeExportedFiles(files, backupFile) {
+  if (!backupFile) throw new Error(t("capture-session.json was not found."));
+  const backup = JSON.parse(await backupFile.text());
+  if (backup.format !== "tropy-capture-session" || !backup.session) throw new Error(t("This is not a recognized Tropy Capture backup."));
+  const source = prepareSession(backup.session);
+  source.id = uuid();
+  const pageNames = new Map(source.items.flatMap((item) => item.pages.map((page) => [page.id, { name: page.exportName || page.originalName, mime: page.mime }])));
+  await mergeSession(source, async (pageId) => {
+    const page = pageNames.get(pageId);
+    const match = findRestoredAsset(files, page?.name);
+    return match?.slice(0, match.size, match.type || page.mime) || null;
+  });
+}
+
+async function mergeZip(file) {
+  if (!file) return;
+  try {
+    const entries = await readCaptureZip(file);
+    const files = [...entries].map(([name, blob]) => Object.assign(blob, {
+      name: name.split("/").pop(), webkitRelativePath: name
+    }));
+    await mergeExportedFiles(files, files.find((entry) => /(^|\/)capture-session\.json$/i.test(entry.webkitRelativePath)));
+  } catch (error) {
+    console.error(error);
+    toast(localizeError(error, "Session merge failed."), "error", 6000);
+  }
+}
+
 async function newSession() {
   await flushSave();
   const created = createDefaultSession();
@@ -1687,6 +1841,7 @@ async function newSession() {
   session = created;
   localStorage.setItem(LAST_SESSION_KEY, session.id);
   ui.selectedItemId = null;
+  ui.selectedItemIds = [];
   ui.selectedPageId = null;
   ui.modal = null;
   await refreshSessionIndex();
@@ -1703,6 +1858,7 @@ async function switchSession(id) {
   await saveSession(session);
   localStorage.setItem(LAST_SESSION_KEY, id);
   ui.selectedItemId = session.items[0]?.id || null;
+  ui.selectedItemIds = ui.selectedItemId ? [ui.selectedItemId] : [];
   ui.selectedPageId = session.items[0]?.pages[0]?.id || null;
   ui.modal = null;
   ui.search = "";
@@ -1725,10 +1881,10 @@ function requestDeleteSession(id) {
   render();
 }
 
-async function handleAction(action, element) {
+async function handleAction(action, element, event = {}) {
   switch (action) {
     case "new-item": createBlankItem(); break;
-    case "select-item": selectItem(element.dataset.itemId); break;
+    case "select-item": selectItem(element.dataset.itemId, event); break;
     case "select-page": ui.selectedPageId = element.dataset.pageId; render(); break;
     case "toggle-stage-zoom": {
       ui.stageZoomEnabled = !ui.stageZoomEnabled;
@@ -1811,7 +1967,7 @@ async function handleAction(action, element) {
       break;
     }
     case "help": ui.modal = "help"; render(); break;
-    case "open-export": ui.modal = "export"; render(); break;
+    case "open-export": ui.exportName = session.name; ui.modal = "export"; render(); break;
     case "path-preset": {
       setImagePathSegments(element.dataset.preset === "archive" ? ARCHIVE_IMAGE_PATH.map((segment) => ({ ...segment })) : []);
       break;
@@ -1841,6 +1997,9 @@ async function handleAction(action, element) {
       break;
     }
     case "sessions": await refreshSessionIndex(); ui.modal = "sessions"; render(); break;
+    case "merge-sessions": document.querySelector("#merge-input")?.click(); break;
+    case "merge-folder": document.querySelector("#merge-folder-input")?.click(); break;
+    case "merge-session": await mergeLocalSession(element.dataset.sessionId); break;
     case "close-modal": if (!ui.busy) {
       ui.modal = null; ui.confirm = null; render();
     } break;
@@ -1864,7 +2023,7 @@ root.addEventListener("click", async (event) => {
   const actionElement = event.target.closest("[data-action]");
   if (actionElement) {
     event.preventDefault();
-    await handleAction(actionElement.dataset.action, actionElement);
+    await handleAction(actionElement.dataset.action, actionElement, event);
     return;
   }
   if (event.target.matches("[data-modal-backdrop]") && !ui.busy) {
@@ -1876,7 +2035,8 @@ root.addEventListener("click", async (event) => {
 
 root.addEventListener("input", (event) => {
   const target = event.target;
-  const item = selectedItem();
+  if (target.matches("[data-export-name]")) { ui.exportName = target.value; return; }
+  const items = selectedItems();
   if (target.matches("[data-date-field]")) target.dataset.dateRaw = target.value;
   if (target.matches("[data-search]")) {
     ui.search = target.value;
@@ -1885,15 +2045,15 @@ root.addEventListener("input", (event) => {
     hydrateAssetUrls();
     return;
   }
-  if (target.hasAttribute("data-meta") && item) {
-    item.metadata[target.dataset.meta] = target.value;
+  if (target.hasAttribute("data-meta") && items.length) {
+    for (const item of items) item.metadata[target.dataset.meta] = target.value;
     scheduleSave();
   } else if (target.hasAttribute("data-default-meta")) {
     session.defaultMetadata[target.dataset.defaultMeta] = target.value;
     scheduleSave();
-  } else if (target.hasAttribute("data-item-bind") && item) {
+  } else if (target.hasAttribute("data-item-bind") && items.length) {
     const key = target.dataset.itemBind;
-    item[key] = key === "tags" ? target.value.split(",").map((tag) => tag.trim()).filter(Boolean) : target.value;
+    for (const item of items) item[key] = key === "tags" ? target.value.split(",").map((tag) => tag.trim()).filter(Boolean) : target.value;
     scheduleSave();
   } else if (target.hasAttribute("data-session-bind")) {
     const key = target.dataset.sessionBind;
@@ -1924,14 +2084,23 @@ root.addEventListener("change", async (event) => {
   } else if (target.id === "restore-input") {
     await restoreFromFolder(target.files);
     target.value = "";
+  } else if (target.id === "merge-input") {
+    await mergeZip(target.files[0]);
+    target.value = "";
+  } else if (target.id === "merge-folder-input") {
+    try {
+      const files = Array.from(target.files);
+      await mergeExportedFiles(files, files.find((entry) => /(^|\/)capture-session\.json$/i.test(pathOf(entry))));
+    } catch (error) { toast(localizeError(error, "Session merge failed."), "error", 6000); }
+    target.value = "";
   } else if (target.matches("[data-session-template]")) {
     session.templateKey = target.value;
     scheduleSave();
     render();
   } else if (target.matches("[data-item-template]")) {
-    const item = selectedItem();
+    if (target.value === "__mixed__") return;
     const template = getTemplate(session, target.value);
-    if (item) item.templateId = template.id;
+    for (const item of selectedItems()) item.templateId = template.id;
     scheduleSave();
     render();
   } else if (target.matches("[data-session-toggle]")) {
@@ -1943,6 +2112,10 @@ root.addEventListener("change", async (event) => {
 
 root.addEventListener("focusin", (event) => {
   const target = event.target;
+  if (target.matches("[data-mixed]")) {
+    target.value = target.value.slice(0, -1);
+    target.removeAttribute("data-mixed");
+  }
   if (target.matches("input, textarea, select, [contenteditable='true']")) {
     ui.focusTitleOnNextTab = false;
   }
@@ -2191,6 +2364,13 @@ document.addEventListener("drop", async (event) => {
 document.addEventListener("keydown", (event) => {
   const mod = event.ctrlKey || event.metaKey;
   const activeElementIsEditable = document.activeElement?.matches?.("input, textarea, select, [contenteditable='true']");
+  if (!activeElementIsEditable && !ui.modal && !ui.confirm &&
+      ["PageUp", "PageDown", "ArrowUp", "ArrowDown"].includes(event.key) &&
+      (event.key.startsWith("Page") || document.activeElement?.closest?.(".item-list, .collapsed-item-list"))) {
+    event.preventDefault();
+    navigateItems(["PageUp", "ArrowUp"].includes(event.key) ? -1 : 1, event);
+    return;
+  }
   if (event.key === "Tab" && !event.shiftKey && ui.focusTitleOnNextTab && !activeElementIsEditable && !ui.modal && !ui.confirm) {
     event.preventDefault();
     ui.focusTitleOnNextTab = false;
@@ -2207,6 +2387,7 @@ document.addEventListener("keydown", (event) => {
     createBlankItem();
   } else if (mod && event.key.toLowerCase() === "e") {
     event.preventDefault();
+    ui.exportName = session.name;
     ui.modal = "export";
     render();
   } else if (event.key === "/" && !/input|textarea|select/i.test(document.activeElement?.tagName || "")) {
@@ -2261,6 +2442,7 @@ function registerWebMcp() {
         const item = makeItem(args);
         session.items.push(item);
         ui.selectedItemId = item.id;
+        ui.selectedItemIds = [item.id];
         await flushSave();
         render();
         return { content: [{ type: "text", text: t("Item {number} created.", { number: item.sequence }) }] };

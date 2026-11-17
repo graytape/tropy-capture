@@ -4,6 +4,53 @@ function cloneValue(value) {
     : JSON.parse(JSON.stringify(value));
 }
 
+export function mixedValue(items, getter) {
+  const first = String(getter(items[0]) ?? "");
+  return { value: first, mixed: items.some((item) => String(getter(item) ?? "") !== first) };
+}
+
+/** Prepare appended records without changing either input session. */
+export function prepareSessionMerge(parent, source, newId) {
+  if (!parent || !source || parent.id === source.id) throw new Error("Select a different session.");
+  const merged = cloneValue(parent);
+  const templateIds = new Map();
+  const templates = new Map([...(merged.customTemplates || [])].map((entry) => [entry.id, entry]));
+  const keys = new Set(["generic", "correspondence", ...merged.customTemplates.map((entry) => entry.key)]);
+  merged.customTemplates = [...(merged.customTemplates || [])];
+  for (const entry of source.customTemplates || []) {
+    let candidate = cloneValue(entry);
+    const existing = templates.get(candidate.id);
+    if (existing && JSON.stringify(existing.source || existing) !== JSON.stringify(candidate.source || candidate)) {
+      candidate.id = `${candidate.id}-${newId()}`;
+    }
+    if ((!existing || candidate.id !== entry.id) && keys.has(candidate.key)) candidate.key = `${candidate.key}-${newId()}`;
+    templateIds.set(entry.id, candidate.id);
+    if (!templates.has(candidate.id)) {
+      merged.customTemplates.push(candidate);
+      templates.set(candidate.id, candidate);
+      keys.add(candidate.key);
+    }
+  }
+  merged.items = [...(merged.items || [])];
+  merged.nextSequence = Math.max(Number(merged.nextSequence) || 1, ...merged.items.map((item) => (Number(item.sequence) || 0) + 1));
+  merged.nextImageSequence = Math.max(Number(merged.nextImageSequence) || 1, ...merged.items.flatMap((item) => item.pages || []).map((page) => (Number(page.exportSequence) || 0) + 1));
+  const copies = [];
+  for (const item of source.items || []) {
+    const copy = cloneValue(item);
+    copy.id = newId();
+    copy.sequence = merged.nextSequence++;
+    copy.templateId = templateIds.get(copy.templateId) || copy.templateId;
+    copy.pages = (copy.pages || []).map((page) => {
+      const originalId = page.id;
+      const id = newId();
+      copies.push({ originalId, id });
+      return { ...page, id, checksum: `tropy-capture-${id}`, exportSequence: merged.nextImageSequence++ };
+    });
+    merged.items.push(copy);
+  }
+  return { merged, copies };
+}
+
 export function collectMetadataSuggestions(items, property, locale = "en-US", limit = 24) {
   const values = [];
   const seen = new Set();

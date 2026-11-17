@@ -30,6 +30,11 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
+      - name: Verify application
+        run: |
+          npm run check
+          npm test
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
