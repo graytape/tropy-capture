@@ -1,4 +1,10 @@
 
+## Version 1.7.0
+
+- Use Ctrl/⌘ or Shift with a click or the item navigation keys to select several documents. Page Up and Page Down move through the items. Editing a field updates only that field in the selection; a trailing + indicates differing values. The Delete action removes the whole selection after confirmation, with its button focused for Enter.
+- Enter a ZIP filename in Export for Tropy. In Manage sessions, merge another local session into the current one with its + button, or use Merge sessions for a Tropy Capture ZIP. The adjacent folder button accepts an extracted export. Originals remain available as separate sessions.
+- The Session tab puts template upload beside its select and shortens the date option to Recognize dates.
+
 ## Version 1.6.0
 
 - Zoom the photo in the main preview with the mouse wheel, then click and drag the enlarged image to inspect areas outside the frame. The image stays within the viewing area. The separate photo viewer has been removed; PDFs still use the browser's viewer in the main panel.
